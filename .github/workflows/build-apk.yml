@@ -43,8 +43,8 @@ jobs:
     - name: Publish to GitHub Release
       uses: softprops/action-gh-release@v2
       with:
-        tag_name: v1.0.0
-        name: "ReelLimiter v1.0.0"
+        tag_name: v1.0.1
+        name: "ReelLimiter v1.0.1"
         body: |
           ### 📱 ReelLimiter APK Download
           Direct download for your Pixel phone:
