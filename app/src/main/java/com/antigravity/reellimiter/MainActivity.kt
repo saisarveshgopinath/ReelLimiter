@@ -4,6 +4,7 @@ import android.accessibilityservice.AccessibilityServiceInfo
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
 import android.view.accessibility.AccessibilityManager
@@ -20,11 +21,12 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Block
 import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Layers
 import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material.icons.filled.Timer
-import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -75,10 +77,10 @@ fun MainScreen(prefs: PreferenceManager) {
     var isAccessibilityGranted by remember { mutableStateOf(isAccessibilityServiceEnabled(context)) }
     var isOverlayGranted by remember { mutableStateOf(Settings.canDrawOverlays(context)) }
     var isEnabled by remember { mutableStateOf(prefs.isServiceEnabled) }
+    var blockCompletely by remember { mutableStateOf(prefs.blockCompletely) }
     var dailyLimit by remember { mutableIntStateOf(prefs.dailyLimitMinutes) }
     var timeSpent by remember { mutableLongStateOf(prefs.timeSpentSeconds) }
 
-    // Recheck permissions whenever activity resumes
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_RESUME) {
@@ -86,6 +88,7 @@ fun MainScreen(prefs: PreferenceManager) {
                 isOverlayGranted = Settings.canDrawOverlays(context)
                 timeSpent = prefs.timeSpentSeconds
                 dailyLimit = prefs.dailyLimitMinutes
+                blockCompletely = prefs.blockCompletely
             }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
@@ -95,9 +98,11 @@ fun MainScreen(prefs: PreferenceManager) {
     }
 
     val totalLimitSeconds = (dailyLimit * 60).toFloat()
-    val progressFraction = if (totalLimitSeconds > 0) {
-        (timeSpent.toFloat() / totalLimitSeconds).coerceIn(0f, 1f)
-    } else 0f
+    val progressFraction = when {
+        blockCompletely -> 1f
+        totalLimitSeconds > 0 -> (timeSpent.toFloat() / totalLimitSeconds).coerceIn(0f, 1f)
+        else -> 0f
+    }
 
     val animatedProgress by animateFloatAsState(
         targetValue = progressFraction,
@@ -132,6 +137,52 @@ fun MainScreen(prefs: PreferenceManager) {
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
 
+            // Android Restricted Settings Helper Card (Crucial for Pixel Android 13/14+)
+            if (!isAccessibilityGranted) {
+                Card(
+                    shape = RoundedCornerShape(24.dp),
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.tertiaryContainer
+                    ),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(modifier = Modifier.padding(16.dp)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(
+                                imageVector = Icons.Default.Info,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.onTertiaryContainer
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                text = "Pixel / Android Setup Tip",
+                                fontWeight = FontWeight.Bold,
+                                style = MaterialTheme.typography.titleSmall,
+                                color = MaterialTheme.colorScheme.onTertiaryContainer
+                            )
+                        }
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Text(
+                            text = "On Pixel (Android 13+), if ReelLimiter is greyed out under 'Downloaded apps', tap the App Info button below, press the 3-dots (top right) -> 'Allow restricted settings'. Then return to Accessibility.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onTertiaryContainer
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        FilledTonalButton(
+                            onClick = {
+                                val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+                                    data = Uri.fromParts("package", context.packageName, null)
+                                }
+                                context.startActivity(intent)
+                            },
+                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp)
+                        ) {
+                            Text("Open App Info (Allow Restricted)", fontSize = 12.sp)
+                        }
+                    }
+                }
+            }
+
             // Service status card with switch
             Card(
                 shape = RoundedCornerShape(28.dp),
@@ -158,7 +209,9 @@ fun MainScreen(prefs: PreferenceManager) {
                         )
                         Spacer(modifier = Modifier.height(4.dp))
                         Text(
-                            text = if (isEnabled) "Detecting and limiting Reels" else "Service is temporarily disabled",
+                            text = if (isEnabled) {
+                                if (blockCompletely) "100% Permanently blocking Reels" else "Limiting Reels to ${dailyLimit}m daily"
+                            } else "Protection is temporarily turned off",
                             style = MaterialTheme.typography.bodySmall,
                             color = if (isEnabled) MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.8f)
                             else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f)
@@ -169,6 +222,52 @@ fun MainScreen(prefs: PreferenceManager) {
                         onCheckedChange = { checked ->
                             isEnabled = checked
                             prefs.isServiceEnabled = checked
+                        }
+                    )
+                }
+            }
+
+            // PERMANENT BLOCK SWITCH CARD
+            Card(
+                shape = RoundedCornerShape(28.dp),
+                colors = CardDefaults.cardColors(
+                    containerColor = if (blockCompletely) MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.5f)
+                    else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f)
+                ),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(20.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Row(modifier = Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            imageVector = Icons.Default.Block,
+                            contentDescription = null,
+                            tint = if (blockCompletely) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary
+                        )
+                        Spacer(modifier = Modifier.width(12.dp))
+                        Column {
+                            Text(
+                                text = "Permanently Block Reels",
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.Bold
+                            )
+                            Text(
+                                text = "0 seconds allowed. Reels immediately blocked upon opening.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                    Switch(
+                        checked = blockCompletely,
+                        onCheckedChange = { checked ->
+                            blockCompletely = checked
+                            prefs.blockCompletely = checked
                         }
                     )
                 }
@@ -202,106 +301,122 @@ fun MainScreen(prefs: PreferenceManager) {
                         CircularProgressIndicator(
                             progress = { animatedProgress },
                             modifier = Modifier.fillMaxSize(),
-                            color = if (progressFraction >= 1f) MaterialTheme.colorScheme.error
+                            color = if (blockCompletely || progressFraction >= 1f) MaterialTheme.colorScheme.error
                             else MaterialTheme.colorScheme.primary,
                             strokeWidth = 14.dp,
                             strokeCap = StrokeCap.Round
                         )
                         Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                            val spentMinutes = timeSpent / 60
-                            val spentSecondsRemainder = timeSpent % 60
-                            Text(
-                                text = String.format("%02d:%02d", spentMinutes, spentSecondsRemainder),
-                                fontSize = 38.sp,
-                                fontWeight = FontWeight.ExtraBold,
-                                color = MaterialTheme.colorScheme.onSurface
-                            )
-                            Text(
-                                text = "used of ${dailyLimit}m limit",
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
+                            if (blockCompletely) {
+                                Text(
+                                    text = "BLOCKED",
+                                    fontSize = 28.sp,
+                                    fontWeight = FontWeight.ExtraBold,
+                                    color = MaterialTheme.colorScheme.error
+                                )
+                                Text(
+                                    text = "Permanent mode",
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            } else {
+                                val spentMinutes = timeSpent / 60
+                                val spentSecondsRemainder = timeSpent % 60
+                                Text(
+                                    text = String.format("%02d:%02d", spentMinutes, spentSecondsRemainder),
+                                    fontSize = 38.sp,
+                                    fontWeight = FontWeight.ExtraBold,
+                                    color = MaterialTheme.colorScheme.onSurface
+                                )
+                                Text(
+                                    text = "used of ${dailyLimit}m limit",
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
                         }
                     }
 
                     Spacer(modifier = Modifier.height(16.dp))
 
                     Text(
-                        text = if (timeSpent >= totalLimitSeconds) "🚨 Reel limit reached! Instagram DMs and Feed remain active."
-                        else "DMs, Stories, and Feeds are never limited.",
+                        text = if (blockCompletely) "🚫 All Reels permanently blocked. DMs, Stories, and Feeds remain 100% accessible!"
+                        else if (timeSpent >= totalLimitSeconds) "🚨 Reel limit reached! Instagram DMs and Feed remain active."
+                        else "DMs, Stories, and regular Feeds are never blocked.",
                         textAlign = TextAlign.Center,
                         style = MaterialTheme.typography.bodySmall,
-                        color = if (timeSpent >= totalLimitSeconds) MaterialTheme.colorScheme.error
+                        color = if (blockCompletely || timeSpent >= totalLimitSeconds) MaterialTheme.colorScheme.error
                         else MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
             }
 
-            // Daily Limit Selector
-            Card(
-                shape = RoundedCornerShape(28.dp),
-                colors = CardDefaults.cardColors(
-                    containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f)
-                ),
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(20.dp)
+            // Daily Limit Selector (Visible if not in permanent block mode)
+            AnimatedVisibility(visible = !blockCompletely) {
+                Card(
+                    shape = RoundedCornerShape(28.dp),
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f)
+                    ),
+                    modifier = Modifier.fillMaxWidth()
                 ) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        modifier = Modifier.fillMaxWidth()
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(20.dp)
                     ) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Icon(
-                                imageVector = Icons.Default.Timer,
-                                contentDescription = null,
-                                tint = MaterialTheme.colorScheme.primary
-                            )
-                            Spacer(modifier = Modifier.width(8.dp))
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Icon(
+                                    imageVector = Icons.Default.Timer,
+                                    contentDescription = null,
+                                    tint = MaterialTheme.colorScheme.primary
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text(
+                                    text = "Daily Reels Allowance",
+                                    style = MaterialTheme.typography.titleMedium,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                            }
                             Text(
-                                text = "Daily Reels Allowance",
+                                text = "${dailyLimit} min",
                                 style = MaterialTheme.typography.titleMedium,
-                                fontWeight = FontWeight.SemiBold
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.primary
                             )
                         }
+
+                        Spacer(modifier = Modifier.height(12.dp))
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            listOf(5, 10, 15, 20).forEach { limitPreset ->
+                                FilterChip(
+                                    selected = dailyLimit == limitPreset,
+                                    onClick = {
+                                        dailyLimit = limitPreset
+                                        prefs.dailyLimitMinutes = limitPreset
+                                    },
+                                    label = { Text("${limitPreset}m") },
+                                    modifier = Modifier.weight(1f)
+                                )
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.height(8.dp))
                         Text(
-                            text = "${dailyLimit} min",
-                            style = MaterialTheme.typography.titleMedium,
-                            fontWeight = FontWeight.Bold,
-                            color = MaterialTheme.colorScheme.primary
+                            text = "Maximum daily limit is capped at 20 minutes.",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }
-
-                    Spacer(modifier = Modifier.height(12.dp))
-
-                    // Preset chips up to max 20 min
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        listOf(5, 10, 15, 20).forEach { limitPreset ->
-                            FilterChip(
-                                selected = dailyLimit == limitPreset,
-                                onClick = {
-                                    dailyLimit = limitPreset
-                                    prefs.dailyLimitMinutes = limitPreset
-                                },
-                                label = { Text("${limitPreset}m") },
-                                modifier = Modifier.weight(1f)
-                            )
-                        }
-                    }
-
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Text(
-                        text = "Maximum daily limit is capped at 20 minutes to keep you productive.",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
                 }
             }
 
@@ -328,7 +443,7 @@ fun MainScreen(prefs: PreferenceManager) {
                     PermissionItem(
                         icon = Icons.Default.Shield,
                         title = "Accessibility Service",
-                        subtitle = "Required to recognize when Reels tab or viewer is opened",
+                        subtitle = "Find 'ReelLimiter' under Downloaded apps and toggle On",
                         isGranted = isAccessibilityGranted,
                         onGrantClick = {
                             val intent = Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)
@@ -431,11 +546,10 @@ fun PermissionItem(
 fun isAccessibilityServiceEnabled(context: Context): Boolean {
     val am = context.getSystemService(Context.ACCESSIBILITY_SERVICE) as AccessibilityManager
     val enabledServices = am.getEnabledAccessibilityServiceList(AccessibilityServiceInfo.FEEDBACK_ALL_MASK)
-    val expectedId = "${context.packageName}/${ReelAccessibilityService::class.java.canonicalName}"
 
     for (service in enabledServices) {
-        if (service.id.equals(expectedId, ignoreCase = true) ||
-            service.id.contains("ReelAccessibilityService", ignoreCase = true)) {
+        val id = service.id.lowercase()
+        if (id.contains("reellimiter") || id.contains("com.antigravity.reellimiter")) {
             return true
         }
     }

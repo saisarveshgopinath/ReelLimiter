@@ -15,6 +15,7 @@ class PreferenceManager(context: Context) {
         private const val KEY_TIME_SPENT_SECONDS = "time_spent_seconds"
         private const val KEY_LAST_DATE = "last_date"
         private const val KEY_SERVICE_ENABLED = "service_enabled"
+        private const val KEY_BLOCK_COMPLETELY = "block_completely"
         const val MAX_LIMIT_MINUTES = 20
     }
 
@@ -35,6 +36,10 @@ class PreferenceManager(context: Context) {
                 .apply()
         }
     }
+
+    var blockCompletely: Boolean
+        get() = prefs.getBoolean(KEY_BLOCK_COMPLETELY, false)
+        set(value) = prefs.edit().putBoolean(KEY_BLOCK_COMPLETELY, value).apply()
 
     var dailyLimitMinutes: Int
         get() = prefs.getInt(KEY_DAILY_LIMIT_MINUTES, 20).coerceIn(1, MAX_LIMIT_MINUTES)
@@ -63,8 +68,11 @@ class PreferenceManager(context: Context) {
         set(value) = prefs.edit().putBoolean(KEY_SERVICE_ENABLED, value).apply()
 
     val isLimitReached: Boolean
-        get() = timeSpentSeconds >= (dailyLimitMinutes * 60L)
+        get() = blockCompletely || timeSpentSeconds >= (dailyLimitMinutes * 60L)
 
     val remainingSeconds: Long
-        get() = ((dailyLimitMinutes * 60L) - timeSpentSeconds).coerceAtLeast(0L)
+        get() {
+            if (blockCompletely) return 0L
+            return ((dailyLimitMinutes * 60L) - timeSpentSeconds).coerceAtLeast(0L)
+        }
 }
