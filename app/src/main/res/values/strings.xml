@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">ReelLimiter</string>
+    <string name="accessibility_service_description">Monitors Instagram Reels to help you stay within your daily screen time limit without blocking your DMs, Feed, or Stories.</string>
+</resources>
