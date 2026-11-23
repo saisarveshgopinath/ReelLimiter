@@ -30,6 +30,7 @@ class ReelAccessibilityService : AccessibilityService() {
     private var isWatchingReel = false
     private var windowManager: WindowManager? = null
     private var overlayView: View? = null
+    private var lastBlockTimestamp = 0L
 
     private val tickerRunnable = object : Runnable {
         override fun run() {
@@ -92,7 +93,7 @@ class ReelAccessibilityService : AccessibilityService() {
             }
         }
 
-        // 2. Check for selected navigation tab with description "Reels"
+        // 2. Check for navigation tab with description "Reels"
         val reelsTabNodes = rootNode.findAccessibilityNodeInfosByText("Reels")
         if (!reelsTabNodes.isNullOrEmpty()) {
             for (node in reelsTabNodes) {
@@ -143,14 +144,82 @@ class ReelAccessibilityService : AccessibilityService() {
     private fun blockReels() {
         stopReelTimer()
 
-        // 1. Send Back action to kick user out of Reels into Feed or DMs
-        performGlobalAction(GLOBAL_ACTION_BACK)
+        // Debounce block actions by at least 1.2 seconds so rapid back actions don't exit Instagram completely
+        val now = System.currentTimeMillis()
+        if (now - lastBlockTimestamp < 1200L) {
+            return
+        }
+        lastBlockTimestamp = now
 
-        // 2. Trigger subtle haptic warning feedback
+        val rootNode = rootInActiveWindow
+
+        // Strategy 1: Switch directly to Feed or Home tab if accessible
+        var navigatedAway = false
+        if (rootNode != null) {
+            navigatedAway = navigateToFeedTab(rootNode)
+        }
+
+        // Strategy 2: If we couldn't click Home/Feed, perform a single GLOBAL_ACTION_BACK to exit Reels viewer
+        if (!navigatedAway) {
+            performGlobalAction(GLOBAL_ACTION_BACK)
+        }
+
         vibratePhone()
-
-        // 3. Show floating overlay notice if permitted
         showBlockOverlay()
+    }
+
+    private fun navigateToFeedTab(rootNode: AccessibilityNodeInfo): Boolean {
+        // Try to find and click the Home / Feed tab
+        val homeNodes = rootNode.findAccessibilityNodeInfosByText("Home")
+        if (!homeNodes.isNullOrEmpty()) {
+            for (node in homeNodes) {
+                if (performClickOnNodeOrParent(node)) {
+                    return true
+                }
+            }
+        }
+
+        val feedNodes = rootNode.findAccessibilityNodeInfosByText("Feed")
+        if (!feedNodes.isNullOrEmpty()) {
+            for (node in feedNodes) {
+                if (performClickOnNodeOrParent(node)) {
+                    return true
+                }
+            }
+        }
+
+        // Search by content description for Home/Feed
+        return searchAndClickHome(rootNode, depth = 0)
+    }
+
+    private fun searchAndClickHome(node: AccessibilityNodeInfo, depth: Int): Boolean {
+        if (depth > 6) return false
+
+        val desc = node.contentDescription?.toString()?.lowercase() ?: ""
+        if (desc.contains("home, tab") || desc.contains("home tab") || desc == "home") {
+            if (performClickOnNodeOrParent(node)) {
+                return true
+            }
+        }
+
+        for (i in 0 until node.childCount) {
+            val child = node.getChild(i) ?: continue
+            if (searchAndClickHome(child, depth + 1)) {
+                return true
+            }
+        }
+        return false
+    }
+
+    private fun performClickOnNodeOrParent(node: AccessibilityNodeInfo): Boolean {
+        if (node.isClickable) {
+            return node.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+        }
+        val parent = node.parent
+        if (parent != null && parent.isClickable) {
+            return parent.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+        }
+        return false
     }
 
     private fun vibratePhone() {
@@ -202,7 +271,11 @@ class ReelAccessibilityService : AccessibilityService() {
             val tvMessage = view.findViewById<TextView>(R.id.tvOverlayMessage)
             val btnDismiss = view.findViewById<Button>(R.id.btnOverlayDismiss)
 
-            tvMessage.text = "Daily Reels limit reached (${prefs.dailyLimitMinutes}m). Your DMs, Feed, and Stories remain available!"
+            if (prefs.blockCompletely) {
+                tvMessage.text = "Reels are permanently blocked. Your DMs, Feed, and Stories remain available!"
+            } else {
+                tvMessage.text = "Daily Reels limit reached (${prefs.dailyLimitMinutes}m). Your DMs, Feed, and Stories remain available!"
+            }
 
             btnDismiss.setOnClickListener {
                 dismissBlockOverlay()
@@ -211,10 +284,10 @@ class ReelAccessibilityService : AccessibilityService() {
             windowManager?.addView(view, params)
             overlayView = view
 
-            // Auto-dismiss after 6 seconds
+            // Auto-dismiss after 4 seconds
             handler.postDelayed({
                 dismissBlockOverlay()
-            }, 6000)
+            }, 4000)
         } catch (e: Exception) {
             Log.e("ReelLimiter", "Error showing overlay", e)
         }
