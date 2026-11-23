@@ -62,7 +62,22 @@ class ReelAccessibilityService : AccessibilityService() {
             return
         }
 
+        // Only react to state and content changes
+        val eventType = event.eventType
+        if (eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED &&
+            eventType != AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED) {
+            return
+        }
+
         val rootNode = rootInActiveWindow ?: return
+
+        // 1. NEVER block if user is currently inside Direct Messages (DMs) or Chat Thread
+        if (isInDirectMessages(rootNode)) {
+            stopReelTimer()
+            return
+        }
+
+        // 2. Check if user is in Reels
         val reelsDetected = detectReelsView(rootNode)
 
         if (reelsDetected) {
@@ -76,14 +91,54 @@ class ReelAccessibilityService : AccessibilityService() {
         }
     }
 
+    /**
+     * Accurately detects if the active window is Direct Messages (Inbox or Chat thread).
+     * If true, Reels blocking must NEVER trigger.
+     */
+    private fun isInDirectMessages(rootNode: AccessibilityNodeInfo): Boolean {
+        // Common view IDs for Direct Messages / Thread in Instagram
+        val directViewIds = listOf(
+            "com.instagram.android:id/direct_thread_layout",
+            "com.instagram.android:id/row_thread_composer_textarea",
+            "com.instagram.android:id/direct_inbox_layout",
+            "com.instagram.android:id/message_composer_container",
+            "com.instagram.android:id/direct_text_message_text_view",
+            "com.instagram.android:id/action_bar_title_chevron",
+            "com.instagram.android:id/row_inbox_container"
+        )
+        for (id in directViewIds) {
+            val nodes = rootNode.findAccessibilityNodeInfosByViewId(id)
+            if (!nodes.isNullOrEmpty()) {
+                return true
+            }
+        }
+
+        // Check for text identifiers like "Messages", "Chats", "Search chats"
+        val messageHeaders = listOf("Messages", "Chats", "Direct", "Search")
+        for (title in messageHeaders) {
+            val nodes = rootNode.findAccessibilityNodeInfosByText(title)
+            if (!nodes.isNullOrEmpty()) {
+                for (node in nodes) {
+                    val resName = node.viewIdResourceName?.lowercase() ?: ""
+                    if (resName.contains("title") || resName.contains("action_bar") || resName.contains("header")) {
+                        return true
+                    }
+                }
+            }
+        }
+        return false
+    }
+
+    /**
+     * Accurately detects if active screen is specifically the dedicated Reels viewer/tab.
+     */
     private fun detectReelsView(rootNode: AccessibilityNodeInfo): Boolean {
-        // 1. Direct view ID checks commonly used by Instagram for Reels containers/viewers
+        // 1. Check dedicated fullscreen clips viewer (when playing a Reel)
         val reelViewIds = listOf(
-            "com.instagram.android:id/reel_viewer_root",
             "com.instagram.android:id/clips_viewer_view_pager",
             "com.instagram.android:id/clips_viewer_container",
             "com.instagram.android:id/clips_video_container",
-            "com.instagram.android:id/clips_swipe_refresh_layout"
+            "com.instagram.android:id/reel_viewer_root"
         )
 
         for (id in reelViewIds) {
@@ -93,7 +148,7 @@ class ReelAccessibilityService : AccessibilityService() {
             }
         }
 
-        // 2. Check for navigation tab with description "Reels"
+        // 2. Check if the bottom navigation Reels tab is CURRENTLY SELECTED
         val reelsTabNodes = rootNode.findAccessibilityNodeInfosByText("Reels")
         if (!reelsTabNodes.isNullOrEmpty()) {
             for (node in reelsTabNodes) {
@@ -101,30 +156,13 @@ class ReelAccessibilityService : AccessibilityService() {
                     return true
                 }
                 val desc = node.contentDescription?.toString()?.lowercase() ?: ""
-                if (desc.contains("reels, tab") || desc.contains("reels tab")) {
+                if ((desc.contains("reels, tab") || desc.contains("reels tab")) && 
+                    (node.isSelected || node.parent?.isSelected == true)) {
                     return true
                 }
             }
         }
 
-        // 3. Recursive inspection for clips/reels identifiers
-        return hasClipsOrReelMarkers(rootNode, depth = 0)
-    }
-
-    private fun hasClipsOrReelMarkers(node: AccessibilityNodeInfo, depth: Int): Boolean {
-        if (depth > 6) return false
-
-        val viewId = node.viewIdResourceName?.lowercase() ?: ""
-        if (viewId.contains("clips_video") || viewId.contains("clips_viewer")) {
-            return true
-        }
-
-        for (i in 0 until node.childCount) {
-            val child = node.getChild(i) ?: continue
-            if (hasClipsOrReelMarkers(child, depth + 1)) {
-                return true
-            }
-        }
         return false
     }
 
@@ -144,23 +182,20 @@ class ReelAccessibilityService : AccessibilityService() {
     private fun blockReels() {
         stopReelTimer()
 
-        // Debounce block actions by at least 1.2 seconds so rapid back actions don't exit Instagram completely
         val now = System.currentTimeMillis()
-        if (now - lastBlockTimestamp < 1200L) {
+        // Stronger debounce (1.5 seconds) to stop any rapid-fire looping
+        if (now - lastBlockTimestamp < 1500L) {
             return
         }
         lastBlockTimestamp = now
 
-        val rootNode = rootInActiveWindow
+        val rootNode = rootInActiveWindow ?: return
 
-        // Strategy 1: Switch directly to Feed or Home tab if accessible
-        var navigatedAway = false
-        if (rootNode != null) {
-            navigatedAway = navigateToFeedTab(rootNode)
-        }
-
-        // Strategy 2: If we couldn't click Home/Feed, perform a single GLOBAL_ACTION_BACK to exit Reels viewer
-        if (!navigatedAway) {
+        // 1. If we are on the Reels tab, click Home/Feed once
+        val clickedHome = clickHomeTabIfSelected(rootNode)
+        
+        // 2. If it was a fullscreen reel opened over another screen, single Back action
+        if (!clickedHome) {
             performGlobalAction(GLOBAL_ACTION_BACK)
         }
 
@@ -168,8 +203,8 @@ class ReelAccessibilityService : AccessibilityService() {
         showBlockOverlay()
     }
 
-    private fun navigateToFeedTab(rootNode: AccessibilityNodeInfo): Boolean {
-        // Try to find and click the Home / Feed tab
+    private fun clickHomeTabIfSelected(rootNode: AccessibilityNodeInfo): Boolean {
+        // Look for the Home bottom navigation tab
         val homeNodes = rootNode.findAccessibilityNodeInfosByText("Home")
         if (!homeNodes.isNullOrEmpty()) {
             for (node in homeNodes) {
@@ -179,21 +214,12 @@ class ReelAccessibilityService : AccessibilityService() {
             }
         }
 
-        val feedNodes = rootNode.findAccessibilityNodeInfosByText("Feed")
-        if (!feedNodes.isNullOrEmpty()) {
-            for (node in feedNodes) {
-                if (performClickOnNodeOrParent(node)) {
-                    return true
-                }
-            }
-        }
-
-        // Search by content description for Home/Feed
+        // Fallback: search by content description for Home tab
         return searchAndClickHome(rootNode, depth = 0)
     }
 
     private fun searchAndClickHome(node: AccessibilityNodeInfo, depth: Int): Boolean {
-        if (depth > 6) return false
+        if (depth > 5) return false
 
         val desc = node.contentDescription?.toString()?.lowercase() ?: ""
         if (desc.contains("home, tab") || desc.contains("home tab") || desc == "home") {
@@ -272,9 +298,9 @@ class ReelAccessibilityService : AccessibilityService() {
             val btnDismiss = view.findViewById<Button>(R.id.btnOverlayDismiss)
 
             if (prefs.blockCompletely) {
-                tvMessage.text = "Reels are permanently blocked. Your DMs, Feed, and Stories remain available!"
+                tvMessage.text = "Reels are blocked. Your DMs, Feed, and Stories remain available!"
             } else {
-                tvMessage.text = "Daily Reels limit reached (${prefs.dailyLimitMinutes}m). Your DMs, Feed, and Stories remain available!"
+                tvMessage.text = "Daily Reels limit reached (${prefs.dailyLimitMinutes}m). Your DMs and Feed remain available!"
             }
 
             btnDismiss.setOnClickListener {
@@ -284,10 +310,10 @@ class ReelAccessibilityService : AccessibilityService() {
             windowManager?.addView(view, params)
             overlayView = view
 
-            // Auto-dismiss after 4 seconds
+            // Auto-dismiss after 3 seconds
             handler.postDelayed({
                 dismissBlockOverlay()
-            }, 4000)
+            }, 3000)
         } catch (e: Exception) {
             Log.e("ReelLimiter", "Error showing overlay", e)
         }
